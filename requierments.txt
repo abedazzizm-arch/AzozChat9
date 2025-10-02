@@ -1,0 +1,4 @@
+kivy
+requests
+requests-oauthlib
+websocket-client
