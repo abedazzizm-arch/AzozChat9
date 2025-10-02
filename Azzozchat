@@ -1,0 +1,1028 @@
+import kivy
+from kivy.app import App
+from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+# إضافة socketio للمحادثات الصوتية
+import socketio
+import threading
+import time
+from requests_oauthlib import OAuth2Session
+import webbrowser
+import requests
+import websocket
+import json
+
+# شاشة رئيسية
+from kivy.uix.textinput import TextInput
+from kivy.uix.image import Image
+from kivy.uix.label import Label
+from kivy.uix.button import Button
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.core.window import Window
+from kivy.utils import get_color_from_hex
+
+Window.clearcolor = get_color_from_hex("#010131")
+
+GOOGLE_CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID'
+GOOGLE_CLIENT_SECRET = 'YOUR_GOOGLE_CLIENT_SECRET'
+GOOGLE_AUTHORIZATION_BASE_URL = 'https://accounts.google.com/o/oauth2/auth'
+GOOGLE_TOKEN_URL = 'https://accounts.google.com/o/oauth2/token'
+GOOGLE_REDIRECT_URI = 'http://localhost:8080/'
+GOOGLE_SCOPE = ['openid', 'email', 'profile']
+
+FACEBOOK_CLIENT_ID = 'YOUR_FACEBOOK_CLIENT_ID'
+FACEBOOK_CLIENT_SECRET = 'YOUR_FACEBOOK_CLIENT_SECRET'
+FACEBOOK_AUTHORIZATION_BASE_URL = 'https://www.facebook.com/dialog/oauth'
+FACEBOOK_TOKEN_URL = 'https://graph.facebook.com/oauth/access_token'
+FACEBOOK_REDIRECT_URI = 'http://localhost:8080/'
+FACEBOOK_SCOPE = ['email', 'public_profile']
+
+class MainScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical', padding=30, spacing=20)
+        logo = Image(source='logo.png', size_hint=(1, 0.3))
+        layout.add_widget(logo)
+        title = Label(text='[b]AzozChat[/b]', font_size=36, color=get_color_from_hex('#f2e9e4'), markup=True)
+        layout.add_widget(title)
+        room_btn = Button(text='غرف صوتية', font_size=22, background_color=get_color_from_hex('#4a4e69'), color=get_color_from_hex('#f2e9e4'), size_hint=(1, 0.15))
+        room_btn.bind(on_press=self.goto_rooms)
+        layout.add_widget(room_btn)
+        gift_btn = Button(text='الهدايا والدعم', font_size=22, background_color=get_color_from_hex('#9a8c98'), color=get_color_from_hex('#f2e9e4'), size_hint=(1, 0.15))
+        gift_btn.bind(on_press=self.goto_gifts)
+        layout.add_widget(gift_btn)
+        target_btn = Button(text='التاركت والأرباح', font_size=22, background_color=get_color_from_hex('#c9ada7'), color=get_color_from_hex('#22223b'), size_hint=(1, 0.15))
+        target_btn.bind(on_press=self.goto_targets)
+        layout.add_widget(target_btn)
+        buy_btn = Button(text='شراء عبر جوجل', font_size=22, background_color=get_color_from_hex('#f2e9e4'), color=get_color_from_hex('#22223b'), size_hint=(1, 0.15))
+        buy_btn.bind(on_press=self.goto_buy)
+        layout.add_widget(buy_btn)
+        self.add_widget(layout)
+    def goto_rooms(self, instance):
+        self.manager.current = 'rooms'
+    def goto_gifts(self, instance):
+        self.manager.current = 'gifts'
+    def goto_targets(self, instance):
+        self.manager.current = 'targets'
+    def goto_buy(self, instance):
+        self.manager.current = 'buy'
+
+
+class RoomsScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(Label(text='إدارة الغرف الصوتية'))
+        self.room_input = TextInput(hint_text='اسم الغرفة', multiline=False)
+        layout.add_widget(self.room_input)
+        create_btn = Button(text='إنشاء غرفة')
+        create_btn.bind(on_press=self.create_room)
+        layout.add_widget(create_btn)
+        join_btn = Button(text='انضمام لغرفة')
+        join_btn.bind(on_press=self.join_room)
+        layout.add_widget(join_btn)
+        back_btn = Button(text='رجوع')
+        back_btn.bind(on_press=self.go_back)
+        layout.add_widget(back_btn)
+        self.add_widget(layout)
+
+    def create_room(self, instance):
+        room_name = self.room_input.text.strip()
+        if room_name:
+            self.manager.get_screen('voice').set_room(room_name)
+            self.manager.current = 'voice'
+
+    def join_room(self, instance):
+        room_name = self.room_input.text.strip()
+        if room_name:
+            self.manager.get_screen('voice').set_room(room_name)
+            self.manager.current = 'voice'
+
+    def go_back(self, instance):
+        self.manager.current = 'main'
+
+class VoiceChatScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.room_name = None
+        layout = BoxLayout(orientation='vertical')
+        self.room_label = Label(text='')
+        layout.add_widget(self.room_label)
+        self.status_label = Label(text='جاري الاتصال...')
+        layout.add_widget(self.status_label)
+        leave_btn = Button(text='خروج')
+        leave_btn.bind(on_press=self.leave_voice_chat)
+        layout.add_widget(leave_btn)
+        self.add_widget(layout)
+        self.sio = socketio.Client()
+
+    def set_room(self, room_name):
+        self.room_name = room_name
+        self.room_label.text = f'أنت في غرفة: {room_name}'
+        threading.Thread(target=self.connect_to_server, daemon=True).start()
+
+    def connect_to_server(self):
+        try:
+            self.sio.connect('http://localhost:5000')
+            self.status_label.text = 'تم الاتصال بالخادم!'
+            if self.room_name:
+                self.sio.emit('join_room', {'room': self.room_name})
+        except Exception as e:
+            self.status_label.text = f'فشل الاتصال: {e}'
+
+    def leave_voice_chat(self, instance):
+        self.manager.current = 'rooms'
+        try:
+            self.sio.disconnect()
+        except:
+            pass
+
+# مدير الشاشات
+class GiftsScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(Label(text='إرسال هدية أو دعم لمستخدم'))
+        self.user_input = TextInput(hint_text='اسم المستخدم', multiline=False)
+        layout.add_widget(self.user_input)
+        self.gift_input = TextInput(hint_text='نوع الهدية أو الدعم', multiline=False)
+        layout.add_widget(self.gift_input)
+        send_btn = Button(text='إرسال')
+        send_btn.bind(on_press=self.send_gift)
+        layout.add_widget(send_btn)
+        back_btn = Button(text='رجوع')
+        back_btn.bind(on_press=self.go_back)
+        layout.add_widget(back_btn)
+        self.status_label = Label(text='')
+        layout.add_widget(self.status_label)
+        self.add_widget(layout)
+
+    def send_gift(self, instance):
+        user = self.user_input.text.strip()
+        gift = self.gift_input.text.strip()
+        if user and gift:
+            # هنا يمكن ربط الإرسال بالخادم أو قاعدة البيانات
+            self.status_label.text = f'تم إرسال {gift} إلى {user}!'
+        else:
+            self.status_label.text = 'يرجى إدخال جميع البيانات.'
+
+    def go_back(self, instance):
+        self.manager.current = 'main'
+
+class TargetsScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.targets = []
+        self.earnings = 0
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(Label(text='لوحة الأرباح والتاركت'))
+        self.earnings_label = Label(text='أرباحك الحالية: 0 ريال')
+        layout.add_widget(self.earnings_label)
+        self.target_input = TextInput(hint_text='أدخل هدفك الجديد', multiline=False)
+        layout.add_widget(self.target_input)
+        add_btn = Button(text='إضافة هدف')
+        add_btn.bind(on_press=self.add_target)
+        layout.add_widget(add_btn)
+        self.targets_list = Label(text='الأهداف:\n')
+        layout.add_widget(self.targets_list)
+        back_btn = Button(text='رجوع')
+        back_btn.bind(on_press=self.go_back)
+        layout.add_widget(back_btn)
+        self.add_widget(layout)
+
+    def add_target(self, instance):
+        target = self.target_input.text.strip()
+        if target:
+            self.targets.append(target)
+            self.update_targets()
+            self.target_input.text = ''
+
+    def update_targets(self):
+        self.targets_list.text = 'الأهداف:\n' + '\n'.join(self.targets)
+
+    def go_back(self, instance):
+        self.manager.current = 'main'
+
+class BuyScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(Label(text='شراء عبر جوجل'))
+        self.status_label = Label(text='اضغط زر الشراء لتجربة العملية')
+        layout.add_widget(self.status_label)
+        buy_btn = Button(text='شراء منتج تجريبي')
+        buy_btn.bind(on_press=self.buy_product)
+        layout.add_widget(buy_btn)
+        back_btn = Button(text='رجوع')
+        back_btn.bind(on_press=self.go_back)
+        layout.add_widget(back_btn)
+        self.add_widget(layout)
+
+    def buy_product(self, instance):
+        # هنا يتم دمج Google Play Billing عبر pyjnius أو API خارجي
+        self.status_label.text = 'تم تنفيذ عملية الشراء (تجريبي)!'
+
+    def go_back(self, instance):
+        self.manager.current = 'main'
+
+def on_message(ws, message):
+    data = json.loads(message)
+    if 'token' in data:
+        print(f"تم استقبال التوكن تلقائياً: {data['token']}")
+        # يمكنك هنا حفظ التوكن أو استخدامه في التطبيق
+
+class LoginScreen(Screen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical', padding=30, spacing=20)
+        title = Label(text='[b]تسجيل الدخول[/b]', font_size=32, color=get_color_from_hex('#f2e9e4'), markup=True)
+        layout.add_widget(title)
+        google_btn = Button(text='تسجيل دخول بحساب جوجل', font_size=22, background_color=get_color_from_hex('#4285F4'), color=get_color_from_hex('#fff'), size_hint=(1, 0.15))
+        google_btn.bind(on_press=self.login_google)
+        layout.add_widget(google_btn)
+        fb_btn = Button(text='تسجيل دخول بحساب فيسبوك', font_size=22, background_color=get_color_from_hex('#3b5998'), color=get_color_from_hex('#fff'), size_hint=(1, 0.15))
+        fb_btn.bind(on_press=self.login_facebook)
+        layout.add_widget(fb_btn)
+        guest_btn = Button(text='دخول كزائر', font_size=20, background_color=get_color_from_hex('#9a8c98'), color=get_color_from_hex('#22223b'), size_hint=(1, 0.12))
+        guest_btn.bind(on_press=self.login_guest)
+        layout.add_widget(guest_btn)
+        self.code_input = TextInput(hint_text='أدخل كود المصادقة هنا', multiline=False, size_hint=(1, 0.12))
+        layout.add_widget(self.code_input)
+        fetch_btn = Button(text='استقبال التوكن', font_size=20, background_color=get_color_from_hex('#c9ada7'), color=get_color_from_hex('#22223b'), size_hint=(1, 0.12))
+        fetch_btn.bind(on_press=self.fetch_token)
+        layout.add_widget(fetch_btn)
+        self.status_label = Label(text='', color=get_color_from_hex('#f2e9e4'))
+        layout.add_widget(self.status_label)
+        self.add_widget(layout)
+        self.start_ws_listener()
+    def login_google(self, instance):
+        self.status_label.text = 'جاري فتح صفحة تسجيل الدخول بجوجل...'
+        oauth = OAuth2Session(GOOGLE_CLIENT_ID, redirect_uri=GOOGLE_REDIRECT_URI, scope=GOOGLE_SCOPE)
+        authorization_url, state = oauth.authorization_url(GOOGLE_AUTHORIZATION_BASE_URL, access_type="offline", prompt="select_account")
+        webbrowser.open(authorization_url)
+        self.status_label.text = 'يرجى إكمال تسجيل الدخول في المتصفح.'
+        threading.Thread(target=self.wait_for_token, args=('google',), daemon=True).start()
+
+    def wait_for_token(self, provider):
+        # مراقبة إعادة التوجيه إلى redirect_uri
+        # في تطبيقات سطح المكتب يمكن مراقبة عنوان URL في المتصفح أو استخدام خادم محلي
+        # هنا مثال بسيط: الانتظار ثم محاولة جلب التوكن تلقائياً (يجب تحسينه حسب الحاجة)
+        time.sleep(10)  # وقت كافٍ لإكمال المصادقة
+        # في تطبيق حقيقي يمكن مراقبة ملف أو استقبال إشارة من الخادم
+        # هنا يجب أن يكون الكود متاحاً (مثلاً عبر ملف أو API)
+        # مثال: جلب الكود من ملف أو متغير خارجي
+        code = self.code_input.text.strip()
+        if code:
+            self.fetch_token_from_server(provider, code)
+        else:
+            self.status_label.text = 'لم يتم العثور على كود المصادقة تلقائياً.'
+
+    def login_facebook(self, instance):
+        self.status_label.text = 'جاري فتح صفحة تسجيل الدخول بفيسبوك...'
+        oauth = OAuth2Session(FACEBOOK_CLIENT_ID, redirect_uri=FACEBOOK_REDIRECT_URI, scope=FACEBOOK_SCOPE)
+        authorization_url, state = oauth.authorization_url(FACEBOOK_AUTHORIZATION_BASE_URL)
+        webbrowser.open(authorization_url)
+        self.status_label.text = 'يرجى إكمال تسجيل الدخول في المتصفح.'
+        # بعد المصادقة، يجب استقبال التوكن عبر redirect URI أو خادم وسيط
+    def login_guest(self, instance):
+        self.manager.current = 'main'
+    def fetch_token(self, instance):
+        code = self.code_input.text.strip()
+        if code:
+            # يمكنك اختيار المزود حسب العملية
+            self.fetch_token_from_server('google', code)
+        else:
+            self.status_label.text = 'يرجى إدخال كود المصادقة.'
+    def fetch_token_from_server(self, provider, code):
+        try:
+            url = f'http://localhost:8080/token_json?provider={provider}&code={code}'
+            response = requests.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                token = data.get('token')
+                self.status_label.text = f'تم تسجيل الدخول بنجاح!\nتوكن: {token}'
+                # يمكنك هنا حفظ التوكن أو استخدامه في التطبيق
+            else:
+                self.status_label.text = f'خطأ في استقبال التوكن: {response.text}'
+        except Exception as e:
+            self.status_label.text = f'فشل الاتصال بالخادم: {e}'
+
+    def start_ws_listener(self):
+        ws = websocket.WebSocketApp("ws://localhost:8080/ws_token", on_message=on_message)
+        threading.Thread(target=ws.run_forever, daemon=True).start()
+
+class ChatApp(App):
+    def build(self):
+        sm = ScreenManager()
+        sm.add_widget(LoginScreen(name='login'))
+        sm.add_widget(MainScreen(name='main'))
+        sm.add_widget(RoomsScreen(name='rooms'))
+        sm.add_widget(VoiceChatScreen(name='voice'))
+        sm.add_widget(GiftsScreen(name='gifts'))
+        sm.add_widget(TargetsScreen(name='targets'))
+        sm.add_widget(BuyScreen(name='buy'))
+        sm.current = 'login'
+        return sm
+if __name__ == '__main__':
+  ChatApp().run()
+{
+  "metadata_version": "2.1",
+  "name": "google-auth",
+  "version": "2.41.0",
+  "requires_dist": [
+    "requests>=2.20.0",
+    "pyasn1-modules>=0.2.1"
+  ]
+}
+"""
+guidance_effects.py
+مثال: مؤثرات للهداية (Highlight Pulse, Spotlight overlay, Tooltip + chime)
+يعمل مع Python 3 (tkinter موجودة افتراضيًا).
+على ويندوز سيحاول تشغيل نغمة بسيطة باستخدام winsound؛ أما على منصات أخرى فيستخدم bell() كبديل.
+"""
+
+import tkinter as tk
+import threading
+import time
+import math
+import sys
+
+# --- صوت التنبيه ---
+def play_chime(frequency=880, duration_ms=150):
+    """يحاول تشغيل نغمة قصيرة. يعمل عبر winsound على ويندوز، وإلا يستخدم bell()."""
+    try:
+        if sys.platform.startswith("win"):
+            import winsound
+            winsound.Beep(frequency, duration_ms)
+        else:
+            # بديل بسيط: جرس النافذة (قد يكون صامتًا على بعض البيئات)
+            root = tk._default_root
+            if root:
+                root.bell()
+    except Exception:
+        try:
+            root = tk._default_root
+            if root:
+                root.bell()
+        except Exception:
+            pass
+
+# --- مؤثر النبض حول ويدجت (Pulse highlight) ---
+class PulseHighlighter:
+    def __init__(self, widget, color="#ffcc33", max_width=8, period=1.0):
+        self.widget = widget
+        self.color = color
+        self.max_width = max_width
+        self.period = period
+        self.running = False
+        self._canvas = None
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._attach_canvas()
+        self._animate(0.0)
+
+    def stop(self):
+        self.running = False
+        if self._canvas:
+            self._canvas.destroy()
+            self._canvas = None
+
+    def _attach_canvas(self):
+        # نرسي كانفاس فوق الويدجت لنعرض الحواف المتغيرة
+        parent = self.widget.master
+        self._canvas = tk.Canvas(parent, highlightthickness=0, bg="", bd=0)
+        self._canvas.place(in_=self.widget, x=-self.max_width, y=-self.max_width,
+                           relwidth=1.0, relheight=1.0, width=self.max_width*2, height=self.max_width*2)
+        self._canvas.lift(self.widget)
+
+    def _animate(self, t):
+        if not self.running:
+            return
+        # t in [0,1)
+        phase = (time.time() % self.period) / self.period
+        # استخدم دالة sin لتنعيم التأثير
+        val = (math.sin(2*math.pi*phase) + 1) / 2  # 0..1
+        width = 1 + val * (self.max_width - 1)
+        alpha = 0.4 + 0.6 * val  # ليس شفافًا جدًا
+        # نحسب اللون مع الشفافية بتقريب (tkinter لا يدعم alpha في stroke) -> نستخدم نفس اللون
+        self._canvas.delete("pulse")
+        w = self.widget.winfo_width()
+        h = self.widget.winfo_height()
+        if w <= 0 or h <= 0:
+            # تأخير حتى يتاح الحجم
+            self.widget.after(50, lambda: self._animate(t+0.05))
+            return
+        # نرسم مستطيل خارجي بمقاس متزايد
+        pad = int(width)
+        self._canvas.create_rectangle(-pad, -pad, w+pad, h+pad,
+                                      outline=self.color, width=width, tags="pulse")
+        self.widget.after(30, lambda: self._animate(t+0.03))
+
+# --- مؤثر Spotlight (تعتيم الخلفية مع نافذة مميزة حول ويدجت) ---
+class Spotlight:
+    def __init__(self, root, target_widget, padding=8, dim_color="#000000", dim_alpha=0.5):
+        self.root = root
+        self.target = target_widget
+        self.padding = padding
+        self.dim_color = dim_color
+        self.dim_alpha = dim_alpha
+        self.overlay = None
+
+    def show(self):
+        if self.overlay:
+            return
+        self.overlay = tk.Toplevel(self.root)
+        self.overlay.overrideredirect(True)
+        self.overlay.attributes("-topmost", True)
+        # حاول ضبط نصف شفافية النافذة إذا كان النظام يسمح
+        try:
+            self.overlay.attributes("-alpha", self.dim_alpha)
+        except Exception:
+            pass
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        x = self.root.winfo_rootx()
+        y = self.root.winfo_rooty()
+        self.overlay.geometry(f"{w}x{h}+{x}+{y}")
+        canvas = tk.Canvas(self.overlay, width=w, height=h, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+        # تغطية كاملة
+        canvas.create_rectangle(0, 0, w, h, fill=self.dim_color, outline="")
+        # احسب موقع الهدف بالنسبة للشاشة
+        tx = self.target.winfo_rootx() - x
+        ty = self.target.winfo_rooty() - y
+        tw = self.target.winfo_width()
+        th = self.target.winfo_height()
+        # منطقة مفرغة حول الهدف: نرسم مربع بنفس لون الخلفية لتبدو "نافذة"
+        pad = self.padding
+        # على بعض الأنظمة لا يمكن عمل "hole" بسهولة؛ كحل بديل نرسم مستطيلاً بنفس لون نافذة التطبيق فوق الـoverlay
+        # لذلك نرسم مستطيلاً بألفا=1 (لا يدعمه tkinter) -> بديل: نستخدم نافذة صغيرة شفافة فوق الهدف
+        hole = tk.Toplevel(self.overlay)
+        hole.overrideredirect(True)
+        hole.attributes("-topmost", True)
+        try:
+            hole.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        hx = x + tx - pad
+        hy = y + ty - pad
+        hw = tw + pad*2
+        hh = th + pad*2
+        hole.geometry(f"{hw}x{hh}+{hx}+{hy}")
+        # داخل النافذة hole نضع إطار مرئي ليشد الانتباه
+        frame = tk.Frame(hole, bd=2, relief="solid", background="#ffd54f")
+        frame.place(relwidth=1, relheight=1)
+        # أغلق الـspotlight عند أي نقرة
+        self.overlay.bind("<Button-1>", lambda e: self.close())
+        hole.bind("<Button-1>", lambda e: self.close())
+
+    def close(self):
+        if self.overlay:
+            try:
+                self.overlay.destroy()
+            except Exception:
+                pass
+            self.overlay = None
+
+# --- Tooltip بسيط مع صوت ---
+class GuidedTooltip:
+    def __init__(self, widget, text, delay=400, chime=True):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self.chime = chime
+        self.tipwin = None
+        self.after_id = None
+        widget.bind("<Enter>", self._on_enter)
+        widget.bind("<Leave>", self._on_leave)
+        widget.bind("<Button-1>", self._on_click)
+
+    def _on_enter(self, event=None):
+        self.after_id = self.widget.after(self.delay, self.show)
+
+    def _on_leave(self, event=None):
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+        self.hide()
+
+    def _on_click(self, event=None):
+        # عند النقر يظهر الصوت فورًا
+        if self.chime:
+            threading.Thread(target=play_chime, daemon=True).start()
+
+    def show(self):
+        if self.tipwin:
+            return
+        x = self.widget.winfo_rootx() + 10
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tipwin = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text, justify="left", background="#333", fg="white",
+                         relief="solid", bd=1, padx=8, pady=6, wraplength=240)
+        label.pack()
+        if self.chime:
+            threading.Thread(target=play_chime, daemon=True).start()
+
+    def hide(self):
+        if self.tipwin:
+            try:
+                self.tipwin.destroy()
+            except Exception:
+                pass
+            self.tipwin = None
+
+# --- مثال واجهة تجريبية تجمع المؤثرات ---
+def demo_app():
+    root = tk.Tk()
+    root.title("مثال مؤثرات الهداية")
+    root.geometry("640x360")
+
+    lbl = tk.Label(root, text="تجربة مؤثرات للهداية", font=("Segoe UI", 16))
+    lbl.pack(pady=12)
+
+    frm = tk.Frame(root)
+    frm.pack(pady=20)
+
+    btn1 = tk.Button(frm, text="زر مهم 1", width=12)
+    btn1.grid(row=0, column=0, padx=10)
+
+    btn2 = tk.Button(frm, text="زر مهم 2", width=12)
+    btn2.grid(row=0, column=1, padx=10)
+
+    btn3 = tk.Button(frm, text="افتح Spotlight", width=16)
+    btn3.grid(row=0, column=2, padx=10)
+
+    # attach tooltip with chime
+    GuidedTooltip(btn1, "هذا زر مهم. اضغط هنا للبدء.\nسيصدر صوت تنبيه قصير عند العرض.", delay=600, chime=True)
+    GuidedTooltip(btn2, "زر آخر - يمكنك تخصيص الرسالة لشرح الخطوة التالية.", delay=600, chime=False)
+
+    # pulse highlighter on btn1 when hovered
+    ph = PulseHighlighter(btn1, color="#ff7043", max_width=10, period=1.2)
+    def on_enter_b1(e):
+        ph.start()
+    def on_leave_b1(e):
+        ph.stop()
+    btn1.bind("<Enter>", on_enter_b1)
+    btn1.bind("<Leave>", on_leave_b1)
+
+    # spotlight when btn3 clicked
+    sp = Spotlight(root, btn2, padding=8, dim_alpha=0.45)
+    btn3.config(command=lambda: threading.Thread(target=lambda: (sp.show(), play_chime()), daemon=True).start())
+
+    # زر إغلاق للتجربة
+    close = tk.Button(root, text="إنهاء", command=root.destroy)
+    close.pack(side="bottom", pady=10)
+
+    root.mainloop()
+
+if __name__ == "__main__":
+    demo_app()
+import uuid
+import json
+
+class User:
+    def __init__(self, username, email):
+        # نولد UID فريد باستخدام uuid4
+        self.uid = str(uuid.uuid4())
+        self.username = username
+        self.email = email
+
+    def to_dict(self):
+        return {
+            "uid": self.uid,
+            "username": self.username,
+            "email": self.email
+        }
+
+# مثال على إنشاء حسابات جديدة
+users = []
+
+u1 = User("ahmed", "ahmed@example.com")
+u2 = User("sara", "sara@example.com")
+
+users.append(u1.to_dict())
+users.append(u2.to_dict())
+
+# عرض النتائج
+print(json.dumps(users, indent=4, ensure_ascii=False))
+"""
+owner_account.py
+إنشاء حساب المالك باسم Aboud_malhi — تخزين آمن بواسطة SQLite وPBKDF2.
+متطلبات: Python 3.6+
+"""
+
+import sqlite3
+import uuid
+import os
+import base64
+import hashlib
+import secrets
+import datetime
+
+DB_PATH = "users.db"
+
+# ---------- وظائف المساعدة للتخزين والهاش ----------
+def init_db(db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        uid TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        is_owner INTEGER NOT NULL DEFAULT 0,
+        salt TEXT NOT NULL,
+        pwd_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def generate_uid():
+    return str(uuid.uuid4())
+
+def generate_salt(length=16):
+    return os.urandom(length)
+
+def hash_password(password: str, salt: bytes, iterations: int = 200_000) -> bytes:
+    """
+    يستخدم PBKDF2-HMAC-SHA256 لإنتاج هاش آمن.
+    إرجاع: raw bytes من الهاش.
+    """
+    pwd = password.encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", pwd, salt, iterations)
+
+def b64(x: bytes) -> str:
+    return base64.b64encode(x).decode("ascii")
+
+def b64d(s: str) -> bytes:
+    return base64.b64decode(s.encode("ascii"))
+
+# ---------- وظائف إدارة المستخدمين ----------
+def create_owner_account(username="Aboud_malhi", password=None, db_path=DB_PATH):
+    """
+    ينشئ حساب مالك. إذا لم تُعط كلمة مرور، سيتم توليد واحدة آمنة وعشوائية.
+    يعيد (uid, username, password_generated_flag, password) حيث password فقط للعرض مرة واحدة.
+    """
+    init_db(db_path)
+    if password is None:
+        # password آمنة يتم توليدها وعرضها مرة واحدة فقط
+        password = secrets.token_urlsafe(12)  # ~72 bits entropy
+        pwd_generated = True
+    else:
+        pwd_generated = False
+
+    uid = generate_uid()
+    salt = generate_salt()
+    pwd_hash = hash_password(password, salt)
+
+    # حفظ إلى DB بصيغ base64 للـbytes
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+        INSERT INTO users (uid, username, is_owner, salt, pwd_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            uid,
+            username,
+            1,  # is_owner
+            b64(salt),
+            b64(pwd_hash),
+            datetime.datetime.utcnow().isoformat() + "Z"
+        ))
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        raise ValueError(f"فشل إنشاء الحساب — ربما اسم المستخدم موجود: {e}")
+    conn.close()
+
+    return uid, username, pwd_generated, password
+
+def authenticate(username: str, password: str, db_path=DB_PATH) -> bool:
+    """
+    يتحقق من صحة اسم المستخدم/كلمة المرور.
+    يعيد True إذا نجحت المصادقة.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT salt, pwd_hash FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return False
+    salt_b64, hash_b64 = row
+    salt = b64d(salt_b64)
+    expected = b64d(hash_b64)
+    candidate = hash_password(password, salt)
+    # مقارنة ثابتة زمنياً للتقليل من هجمات التوقيت
+    return secrets.compare_digest(candidate, expected)
+
+def get_user_info(username: str, db_path=DB_PATH):
+    """
+    يعيد معلومات عامة عن المستخدم (بدون كلمات المرور).
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT uid, username, is_owner, created_at FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    uid, uname, is_owner, created_at = row
+    return {"uid": uid, "username": uname, "is_owner": bool(is_owner), "created_at": created_at}
+
+# ---------- مثال تنفيذ مباشر ----------
+if __name__ == "__main__":
+    # حاول إنشاء حساب المالك Aboud_malhi. إن وجد بالفعل سيرمي خطأ.
+    try:
+        uid, username, generated, password = create_owner_account()
+        print("تم إنشاء حساب المالك بنجاح:")
+        print(f"  username: {username}")
+        print(f"  uid: {uid}")
+        if generated:
+            print("  تم توليد كلمة مرور مؤقتة (احفظها الآن، لن تُعرض ثانية):")
+            print(f"  password: {password}")
+        else:
+            print("  استخدمت كلمة مرور زودت بها.")
+    except ValueError as e:
+        print("لم يتم الإنشاء:", e)
+
+    # تجربة مصادقة سريعة (إذا قمت بنسخ كلمة المرور المعروضة أعلاه)
+    test_pass = password  # استخدم كلمة المرور المعروضة أو غيّرها
+    ok = authenticate("Aboud_malhi", test_pass)
+    print("نتيجة مصادقة تجريبية:", "ناجح ✅" if ok else "فشل ❌")
+
+    # عرض معلومات المستخدم
+    info = get_user_info("Aboud_malhi")
+    print("معلومات الحساب (بدون كلمات مرور):", info)
+"""
+agency_hostesses.py
+نظام بسيط لإدارة الوكالات والمضيفات وحسابات الوكلاء.
+- قاعدة بيانات SQLite (ملف: agencies.db)
+- UID فريد لكل كيان (uuid4)
+- كلمات مرور مُخزنة بأمان عبر PBKDF2-HMAC-SHA256 مع salt
+- وظائف إنشاء وكالة، وكلاء، مضيفات، الربط، والاستعلام
+"""
+
+import sqlite3
+import uuid
+import os
+import base64
+import hashlib
+import secrets
+import datetime
+from typing import Optional, List, Dict
+
+DB_PATH = "agencies.db"
+
+# ---------------- helpers للتخزين والهاش ----------------
+def init_db(db_path: str = DB_PATH):
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    # جدول الوكالات
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS agencies (
+        agency_id TEXT PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+    # جدول المستخدمين (مالكين + وكلاء)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        uid TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        role TEXT NOT NULL, -- owner|agent
+        agency_id TEXT,     -- ينطبق على الوكلاء المرتبطين بوكالة
+        salt TEXT NOT NULL,
+        pwd_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(agency_id) REFERENCES agencies(agency_id)
+    )
+    """)
+    # جدول المضيفات
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS hostesses (
+        hostess_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT,
+        phone TEXT,
+        agency_id TEXT,     -- قد تكون NULL إذا غير معروفة
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(agency_id) REFERENCES agencies(agency_id)
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+def generate_uid() -> str:
+    return str(uuid.uuid4())
+
+def generate_salt(length: int = 16) -> bytes:
+    return os.urandom(length)
+
+def hash_password(password: str, salt: bytes, iterations: int = 200_000) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+
+def b64(x: bytes) -> str:
+    return base64.b64encode(x).decode("ascii")
+
+def b64d(s: str) -> bytes:
+    return base64.b64decode(s.encode("ascii"))
+
+# ---------------- وظائف إدارة الوكالات والحسابات ----------------
+def create_agency(name: str, db_path: str = DB_PATH) -> str:
+    """إنشاء وكالة جديدة وإرجاع agency_id"""
+    init_db(db_path)
+    aid = generate_uid()
+    created_at = datetime.datetime.utcnow().isoformat() + "Z"
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    try:
+        cur.execute("INSERT INTO agencies (agency_id, name, created_at) VALUES (?, ?, ?)",
+                    (aid, name, created_at))
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        raise ValueError(f"فشل إنشاء الوكالة — ربما الاسم موجود: {e}")
+    conn.close()
+    return aid
+
+def create_user(username: str, password: str, role: str = "agent",
+                agency_id: Optional[str] = None, db_path: str = DB_PATH) -> str:
+    """
+    إنشاء مستخدم (owner أو agent). يعيد uid المستخدم.
+    role: 'owner' أو 'agent'
+    agency_id: مطلوب لو كان role == 'agent'
+    """
+    init_db(db_path)
+    if role not in ("owner", "agent"):
+        raise ValueError("role يجب أن تكون 'owner' أو 'agent'")
+
+    if role == "agent" and not agency_id:
+        raise ValueError("agency_id مطلوب عند إنشاء agent")
+
+    uid = generate_uid()
+    salt = generate_salt()
+    pwd_hash = hash_password(password, salt)
+    created_at = datetime.datetime.utcnow().isoformat() + "Z"
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+        INSERT INTO users (uid, username, role, agency_id, salt, pwd_hash, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (uid, username, role, agency_id, b64(salt), b64(pwd_hash), created_at))
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        raise ValueError(f"فشل إنشاء المستخدم — ربما اسم المستخدم موجود: {e}")
+    conn.close()
+    return uid
+
+def authenticate(username: str, password: str, db_path: str = DB_PATH) -> Optional[Dict]:
+    """
+    مصادقة المستخدم. يرجع dict بمعلومات المستخدم إذا نجحت، وإلا None.
+    """
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT uid, role, agency_id, salt, pwd_hash FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    uid, role, agency_id, salt_b64, hash_b64 = row
+    salt = b64d(salt_b64)
+    expected = b64d(hash_b64)
+    candidate = hash_password(password, salt)
+    if secrets.compare_digest(candidate, expected):
+        return {"uid": uid, "username": username, "role": role, "agency_id": agency_id}
+    return None
+
+# ---------------- وظائف المضيفات ----------------
+def add_hostess(name: str, email: Optional[str] = None, phone: Optional[str] = None,
+                agency_id: Optional[str] = None, notes: Optional[str] = None,
+                db_path: str = DB_PATH) -> str:
+    """إضافة مضيفة جديدة (قد تربط بوكالة أو تترك agency_id = None)"""
+    init_db(db_path)
+    hid = generate_uid()
+    created_at = datetime.datetime.utcnow().isoformat() + "Z"
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("""
+    INSERT INTO hostesses (hostess_id, name, email, phone, agency_id, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (hid, name, email, phone, agency_id, notes, created_at))
+    conn.commit()
+    conn.close()
+    return hid
+
+def assign_hostess_to_agency(hostess_id: str, agency_id: str, db_path: str = DB_PATH) -> bool:
+    """ربط مضيفة بوكالة"""
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("UPDATE hostesses SET agency_id = ? WHERE hostess_id = ?", (agency_id, hostess_id))
+    changed = cur.rowcount
+    conn.commit()
+    conn.close()
+    return changed > 0
+
+def list_hostesses(agency_id: Optional[str] = None, db_path: str = DB_PATH) -> List[Dict]:
+    """إرجاع قائمة المضيفات، أو مضيفات وكالة معينة إذا أعطيت agency_id"""
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    if agency_id:
+        cur.execute("SELECT hostess_id, name, email, phone, notes, created_at FROM hostesses WHERE agency_id = ?", (agency_id,))
+    else:
+        cur.execute("SELECT hostess_id, name, email, phone, agency_id, notes, created_at FROM hostesses")
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        if agency_id:
+            hid, name, email, phone, notes, created_at = r
+            out.append({"hostess_id": hid, "name": name, "email": email, "phone": phone, "notes": notes, "created_at": created_at})
+        else:
+            hid, name, email, phone, agid, notes, created_at = r
+            out.append({"hostess_id": hid, "name": name, "email": email, "phone": phone, "agency_id": agid, "notes": notes, "created_at": created_at})
+    return out
+
+def get_agency_info(agency_id: str, db_path: str = DB_PATH) -> Optional[Dict]:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT agency_id, name, created_at FROM agencies WHERE agency_id = ?", (agency_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    aid, name, created_at = row
+    return {"agency_id": aid, "name": name, "created_at": created_at}
+
+def list_agencies(db_path: str = DB_PATH) -> List[Dict]:
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT agency_id, name, created_at FROM agencies")
+    rows = cur.fetchall()
+    conn.close()
+    return [{"agency_id": r[0], "name": r[1], "created_at": r[2]} for r in rows]
+
+# ---------------- مثال تجريبي (CLI بسيط) ----------------
+if __name__ == "__main__":
+    print("مثال تجريبي: إنشاء وكالة، وكيل، ومضيفة، ثم استعلام.")
+    # تهيئة DB
+    init_db()
+
+    # 1) إنشاء وكالة جديدة (إذا لم تكن موجودة)
+    agency_name = "Elite_Hostesses"
+    try:
+        agency_id = create_agency(agency_name)
+        print(f"تم إنشاء وكالة: {agency_name} (id={agency_id})")
+    except ValueError:
+        # ربما موجودة - جلبها
+        agencies = list_agencies()
+        agency = next((a for a in agencies if a["name"] == agency_name), None)
+        agency_id = agency["agency_id"] if agency else None
+        print(f"الوكالة موجودة سابقًا. id={agency_id}")
+
+    # 2) إنشاء وكيل مرتبط بالوكالة
+    agent_username = "agent_omar"
+    agent_password = "SecretPass!2025"  # في الواقع يجب توليد أو طلب إدخال آمن
+    try:
+        agent_uid = create_user(agent_username, agent_password, role="agent", agency_id=agency_id)
+        print(f"تم إنشاء وكيل: {agent_username} (uid={agent_uid})")
+    except ValueError as e:
+        print("إنشاء الوكيل فشل:", e)
+
+    # 3) إضافة مضيفة وربطها بالوكالة
+    hid = add_hostess(name="Layla", email="layla@example.com", phone="+962790000000", agency_id=agency_id, notes="خبرة 3 سنوات")
+    print(f"أضيفت مضيفة: Layla (id={hid})")
+
+    # 4) مصادقة الوكيل تجريبيًا
+    auth = authenticate(agent_username, agent_password)
+    print("نتيجة المصادقة:", "ناجح ✅" if auth else "فشل ❌", "| info:", auth)
+
+    # 5) استعلام عن المضيفات في الوكالة
+    hostesses = list_hostesses(agency_id=agency_id)
+    print("مضيفات الوكالة:", hostesses)
+
+    # 6) عرض كل الوكالات
+    print("جميع الوكالات:", list_agencies())
+
+    print("\nملاحظات أمان ومقترحات تطوير:")
+    print("- لا تحتفظ بكلمات مرور نصية في الشيفرة؛ استخدم متغير بيئة أو prompt آمن.")
+    print("- لواجهة ويب استخدم Flask/FastAPI مع HTTPS وJWT/جلسات آمنة.")
+    print("- يمكنك توسيع صلاحيات (roles) وإضافة سجل نشاط (audit log).")
